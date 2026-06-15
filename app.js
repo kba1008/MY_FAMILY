@@ -3,7 +3,7 @@
  *  Backend: Google Apps Script Web App (Code.gs)
  *  ===================================================================== */
 
-const API_URL = 'https://script.google.com/macros/s/AKfycbxgbQXKikEyehzfYvu1nKlR1yCZukzElaa2OLSOE8WO1-sI3ikdn1PLV27mCilWnKZvmQ/exec'; // <-- TAMPAL URL Web App Apps Script di sini
+const API_URL = 'https://script.google.com/macros/s/AKfycbxVGz059cuL-l7CEHABQ57UT46BMZz1CEy6tl27cCpXIMgwJlmmKVpWCj1124kQn9f15A/exec'; // <-- TAMPAL URL Web App Apps Script di sini
 
 const POLL_INTERVAL = 2500;
 // (Kata laluan admin disimpan di server sahaja — tidak didedahkan di UI)
@@ -47,6 +47,10 @@ let seenIds = new Set();
 let settings = { pmEnabled: false, theme: 'aurora' };
 let pmTarget = null; // {userId, name, avatar} or null
 let allUsers = [];
+let pmConversations = {}; // peerUserId -> [{m, mine}]
+let pmActivePeer = null;  // peer being viewed in popup
+let pmUnreadByPeer = {};  // peerId -> unread count (when popup closed / other peer open)
+let notifPermAsked = false;
 
 // ---- mic / voice recording ----
 let mediaRecorder = null;
@@ -153,6 +157,27 @@ function bindUI() {
   $('pmCloseBtn').onclick = closePM;
   $('usersClose').onclick = () => $('usersModal').classList.add('hidden');
   $('usersModal').querySelector('.admin-backdrop').onclick = () => $('usersModal').classList.add('hidden');
+
+  // PM popup handlers
+  $('pmModalClose').onclick = closePMPopup;
+  $('pmModal').querySelector('.admin-backdrop').onclick = closePMPopup;
+  $('pmSendBtn').onclick = sendPMFromPopup;
+  $('pmInput').addEventListener('keypress', (e) => { if (e.key === 'Enter') sendPMFromPopup(); });
+  $('pmAttachBtn').onclick = () => $('pmFileInput').click();
+  $('pmFileInput').onchange = (e) => {
+    const f = e.target.files[0];
+    if (f && pmActivePeer) handlePMFile(f);
+    e.target.value = '';
+  };
+  $('pmPopClose').onclick = (e) => { e.stopPropagation(); hidePMPop(); };
+  $('pmPop').onclick = () => {
+    const peerId = $('pmPop').dataset.peer;
+    hidePMPop();
+    if (peerId) {
+      const u = allUsers.find(x => x.userId === peerId);
+      openPMPopup(u || { userId: peerId, name: $('pmPopName').textContent, avatar: $('pmPopAvatar').textContent });
+    }
+  };
 
   // Image editor controls
   bindEditorUI();
@@ -500,6 +525,7 @@ function enterChat(resumed) {
   $('headerAvatar').textContent = session.avatar;
   if (resumed) showToast('Selamat kembali, ' + session.name + ' 👋', 2000);
   startPolling();
+  requestNotifPerm();
 }
 
 // ===================== POLLING =====================
@@ -537,6 +563,11 @@ async function fetchNew(initial) {
         unreadCount += newFromOther;
         document.title = '(' + unreadCount + ') ' + baseTitle;
       }
+      // Native notification for last new PUBLIC message from others
+      const lastPub = msgs.filter(x => !x.toUserId && x.userId !== session.userId).pop();
+      if (lastPub) {
+        tryNativeNotification('💚 ' + lastPub.name + ' di LOVE MY FAMILY', previewOf(lastPub), lastPub.avatar);
+      }
     }
     setStatus('🟢 Tersambung');
   } catch (e) {
@@ -568,9 +599,10 @@ async function sendText() {
   if (hasBanned(txt)) { showToast('Dilarang mencarut!'); $('inputMsg').value = ''; return; }
   $('inputMsg').value = '';
   $('emojiPicker').style.display = 'none';
+  // Main composer always sends PUBLIC. PMs go through the PM popup.
   await api('send', {
     userId: session.userId, name: session.name, avatar: session.avatar,
-    type: 'text', content: txt, toUserId: pmTarget ? pmTarget.userId : ''
+    type: 'text', content: txt, toUserId: ''
   });
   fetchNew();
 }
@@ -591,7 +623,7 @@ async function handleFile(file) {
     await api('send', {
       userId: session.userId, name: session.name, avatar: session.avatar,
       type, content: up.view || up.url, fileUrl: playbackUrl, fileName: file.name,
-      toUserId: pmTarget ? pmTarget.userId : ''
+      toUserId: ''
     });
     fetchNew();
   } catch (err) { showToast('Ralat upload: ' + err.message); }
@@ -646,8 +678,26 @@ function doClearAll() {
 // ===================== RENDER =====================
 function renderMessage(m, noAnim) {
   const mine = m.userId === session.userId;
+  // PM: route to private popup instead of main feed
+  if (m.toUserId) {
+    const peerId = mine ? m.toUserId : m.userId;
+    if (!pmConversations[peerId]) pmConversations[peerId] = [];
+    if (pmConversations[peerId].some(x => x.m.id === m.id)) return;
+    pmConversations[peerId].push({ m, mine });
+    if (pmActivePeer === peerId && !$('pmModal').classList.contains('hidden')) {
+      appendPMBubble(m, mine);
+    } else if (!mine && !noAnim) {
+      // Incoming PM, not currently viewing this peer -> notify
+      pmUnreadByPeer[peerId] = (pmUnreadByPeer[peerId] || 0) + 1;
+      updateUsersBadge();
+      showPMPop(m);
+      tryNativeNotification('🔒 PM dari ' + m.name, previewOf(m), m.avatar);
+      playBeep();
+    }
+    return;
+  }
   const row = document.createElement('div');
-  row.className = 'msg-row ' + (mine ? 'mine' : 'other') + (m.toUserId ? ' pm' : '') + (noAnim ? ' no-anim' : '');
+  row.className = 'msg-row ' + (mine ? 'mine' : 'other') + (noAnim ? ' no-anim' : '');
   const av = document.createElement('div'); av.className = 'msg-avatar'; av.textContent = m.avatar || '🙂';
   const bub = document.createElement('div'); bub.className = 'bubble ' + (mine ? 'bubble-mine' : 'bubble-other');
   if (!mine) {
@@ -823,6 +873,7 @@ function applySettings(s) {
   const themeChanged = s.theme && s.theme !== settings.theme;
   settings = Object.assign({}, settings, s);
   document.body.setAttribute('data-theme', settings.theme || 'aurora');
+  document.documentElement.setAttribute('data-theme', settings.theme || 'aurora');
   // PM controls visibility
   const btnU = $('btnUsers');
   if (btnU) btnU.style.display = settings.pmEnabled ? '' : 'none';
@@ -833,16 +884,168 @@ function applySettings(s) {
 // ===================== PM (PERSONAL MESSAGE) =====================
 function setPMTarget(u) {
   if (!settings.pmEnabled) { showToast('PM peribadi sedang dimatikan oleh admin'); return; }
-  pmTarget = { userId: u.userId, name: u.name, avatar: u.avatar };
-  $('pmTargetName').textContent = (u.avatar || '🙂') + ' ' + u.name;
-  $('pmBanner').classList.add('show');
-  $('inputMsg').placeholder = 'PM peribadi kepada ' + u.name + '…';
-  $('inputMsg').focus();
+  openPMPopup(u);
 }
 function closePM() {
+  closePMPopup();
+}
+
+// ===================== PM POPUP =====================
+function openPMPopup(u) {
+  if (!u || !u.userId) return;
+  if (!settings.pmEnabled) { showToast('PM peribadi sedang dimatikan oleh admin'); return; }
+  pmActivePeer = u.userId;
+  pmTarget = { userId: u.userId, name: u.name, avatar: u.avatar };
+  pmUnreadByPeer[u.userId] = 0;
+  updateUsersBadge();
+  $('pmPeerAvatar').textContent = u.avatar || '🙂';
+  $('pmPeerName').textContent = u.name || '—';
+  const box = $('pmMessages');
+  box.innerHTML = '';
+  const conv = pmConversations[u.userId] || [];
+  if (!conv.length) {
+    box.innerHTML = '<div class="pm-empty">🔒 Tiada PM lagi. Mulakan perbualan peribadi anda.</div>';
+  } else {
+    conv.forEach(x => appendPMBubble(x.m, x.mine));
+  }
+  $('pmModal').classList.remove('hidden');
+  setTimeout(() => $('pmInput').focus(), 80);
+  hidePMPop();
+}
+function closePMPopup() {
+  $('pmModal').classList.add('hidden');
+  pmActivePeer = null;
   pmTarget = null;
-  $('pmBanner').classList.remove('show');
-  $('inputMsg').placeholder = 'Tulis mesej... (Ctrl+V untuk tampal screenshot)';
+}
+function appendPMBubble(m, mine) {
+  const box = $('pmMessages');
+  const empty = box.querySelector('.pm-empty');
+  if (empty) empty.remove();
+  const b = document.createElement('div');
+  b.className = 'pm-bubble ' + (mine ? 'mine' : 'other');
+  if (m.type === 'image') {
+    const img = document.createElement('img'); img.className = 'media';
+    img.src = m.fileUrl || m.content;
+    img.onclick = () => window.open(m.content || m.fileUrl, '_blank');
+    b.appendChild(img);
+  } else if (m.type === 'video') {
+    const v = document.createElement('video'); v.className = 'media';
+    v.src = m.fileUrl || m.content; v.controls = true; b.appendChild(v);
+  } else if (m.type === 'audio') {
+    b.appendChild(createVoicePlayer(m));
+  } else if (m.type === 'file') {
+    const a = document.createElement('a');
+    a.href = m.content || m.fileUrl; a.target = '_blank'; a.rel = 'noopener';
+    a.className = 'file-chip';
+    a.innerHTML = '📎 <span>' + escapeHtml(m.fileName || 'Fail') + '</span>';
+    b.appendChild(a);
+  } else {
+    const t = document.createElement('div');
+    t.innerHTML = linkify(escapeHtml(m.content || ''));
+    b.appendChild(t);
+  }
+  const time = document.createElement('div'); time.className = 'pmt'; time.textContent = formatTime(m.ts);
+  b.appendChild(time);
+  box.appendChild(b);
+  box.scrollTop = box.scrollHeight;
+}
+async function sendPMFromPopup() {
+  if (!pmActivePeer) return;
+  const inp = $('pmInput');
+  const txt = inp.value.trim();
+  if (!txt) return;
+  if (hasBanned(txt)) { showToast('Dilarang mencarut!'); inp.value = ''; return; }
+  inp.value = '';
+  await api('send', {
+    userId: session.userId, name: session.name, avatar: session.avatar,
+    type: 'text', content: txt, toUserId: pmActivePeer
+  });
+  fetchNew();
+}
+async function handlePMFile(file) {
+  if (!file || !pmActivePeer) return;
+  if (file.size > 25 * 1024 * 1024) { showToast('Maksimum saiz fail: 25MB'); return; }
+  showToast('📤 Memuat naik PM...', 2000);
+  const base64 = await fileToBase64(file);
+  try {
+    const up = await api('upload', { base64, mimeType: file.type, fileName: file.name });
+    if (!up.ok) { showToast('Gagal upload: ' + (up.error || '')); return; }
+    let type = 'file';
+    if ((file.type || '').startsWith('image/')) type = 'image';
+    else if ((file.type || '').startsWith('video/')) type = 'video';
+    else if ((file.type || '').startsWith('audio/')) type = 'audio';
+    const playbackUrl = (type === 'audio') ? normalizeDriveAudioUrl(up.url || up.view) : (up.url || up.view);
+    await api('send', {
+      userId: session.userId, name: session.name, avatar: session.avatar,
+      type, content: up.view || up.url, fileUrl: playbackUrl, fileName: file.name,
+      toUserId: pmActivePeer
+    });
+    fetchNew();
+  } catch (err) { showToast('Ralat upload: ' + err.message); }
+}
+
+function previewOf(m) {
+  if (m.type === 'image') return '📷 Gambar';
+  if (m.type === 'video') return '🎬 Video';
+  if (m.type === 'audio') return '🎤 Voice message';
+  if (m.type === 'file')  return '📎 ' + (m.fileName || 'Fail');
+  return String(m.content || '').slice(0, 90);
+}
+
+function showPMPop(m) {
+  const pop = $('pmPop');
+  $('pmPopAvatar').textContent = m.avatar || '🙂';
+  $('pmPopName').textContent = '🔒 ' + (m.name || 'PM') + ' kirim PM';
+  $('pmPopText').textContent = previewOf(m);
+  pop.dataset.peer = m.userId;
+  pop.classList.add('show');
+  clearTimeout(pop._h);
+  pop._h = setTimeout(hidePMPop, 6500);
+}
+function hidePMPop() { $('pmPop').classList.remove('show'); }
+
+function updateUsersBadge() {
+  const btn = $('btnUsers');
+  if (!btn) return;
+  const total = Object.values(pmUnreadByPeer).reduce((a, b) => a + b, 0);
+  let badge = btn.querySelector('.badge-dot');
+  if (total > 0) {
+    if (!badge) { badge = document.createElement('span'); badge.className = 'badge-dot'; btn.appendChild(badge); }
+    badge.textContent = total > 99 ? '99+' : String(total);
+  } else if (badge) {
+    badge.remove();
+  }
+}
+
+// ===================== NOTIFICATIONS =====================
+function requestNotifPerm() {
+  if (notifPermAsked) return;
+  notifPermAsked = true;
+  try {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(()=>{});
+    }
+  } catch(_) {}
+}
+function tryNativeNotification(title, body, iconEmoji) {
+  try {
+    if (!('Notification' in window)) return;
+    if (Notification.permission !== 'granted') return;
+    if (document.hasFocus && document.hasFocus() && !document.hidden) return;
+    const n = new Notification(title, {
+      body: body || '',
+      tag: 'lmf-msg',
+      icon: emojiToDataURL(iconEmoji || '💬'),
+      badge: emojiToDataURL('💚')
+    });
+    n.onclick = () => { try { window.focus(); n.close(); } catch(_) {} };
+  } catch(_) {}
+}
+function emojiToDataURL(emoji) {
+  try {
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><text y="50" font-size="52">${emoji}</text></svg>`;
+    return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+  } catch(_) { return ''; }
 }
 
 async function openUsersModal() {

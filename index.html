@@ -346,6 +346,50 @@
   .rec-overlay.show{display:flex;}
   .rec-dot{width:10px;height:10px;background:#ef4444;border-radius:50%;animation:blink 1s infinite;}
   @keyframes blink{0%,100%{opacity:1;}50%{opacity:.3;}}
+
+  /* ===== PM POPUP (private chat window) ===== */
+  .pm-card{max-width:480px;display:flex;flex-direction:column;max-height:88dvh;}
+  .pm-messages{padding:14px 18px;display:flex;flex-direction:column;gap:8px;
+    min-height:240px;max-height:55dvh;overflow-y:auto;
+    background:linear-gradient(180deg,rgba(91,108,255,.04),rgba(139,92,255,.04));
+    border-top:1px solid var(--border);border-bottom:1px solid var(--border);}
+  .pm-bubble{max-width:78%;padding:9px 13px;border-radius:16px;font-size:14px;line-height:1.45;
+    word-wrap:break-word;word-break:break-word;position:relative;}
+  .pm-bubble.mine{align-self:flex-end;background:var(--bubble-mine);color:var(--bubble-mine-ink);
+    border-bottom-right-radius:5px;box-shadow:var(--glow-accent);}
+  .pm-bubble.other{align-self:flex-start;background:#fff;color:var(--ink);
+    border:1px solid var(--border);border-bottom-left-radius:5px;box-shadow:var(--shadow-sm);}
+  body[data-theme="midnight"] .pm-bubble.other{background:rgba(30,40,75,.95);color:#e8ecfb;border-color:rgba(255,255,255,.1);}
+  .pm-bubble .pmt{font-size:10px;opacity:.7;margin-top:3px;text-align:right;}
+  .pm-bubble img.media,.pm-bubble video.media{max-width:240px;max-height:240px;border-radius:10px;display:block;cursor:pointer;}
+  .pm-composer{display:flex;gap:8px;padding:12px 16px calc(12px + env(safe-area-inset-bottom));align-items:center;}
+  .pm-composer .lmf-input{flex:1;padding:11px 14px;border-radius:14px;font-size:14px;letter-spacing:normal;text-align:left;font-weight:500;}
+  .pm-empty{text-align:center;color:var(--muted);font-size:13px;padding:30px 10px;}
+  .pm-lock-tag{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:700;
+    color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    padding:2px 8px;border-radius:99px;letter-spacing:.4px;}
+
+  /* PM incoming toast (top-right) */
+  .pm-pop{position:fixed;top:14px;right:14px;z-index:3000;display:flex;align-items:center;gap:10px;
+    padding:12px 16px 12px 12px;background:var(--surface-strong);backdrop-filter:blur(20px) saturate(150%);
+    border:1px solid var(--border-strong);border-radius:16px;box-shadow:var(--shadow-lg);
+    max-width:320px;cursor:pointer;transform:translateX(120%);opacity:0;transition:.32s cubic-bezier(.2,.9,.3,1.2);}
+  .pm-pop.show{transform:translateX(0);opacity:1;}
+  .pm-pop .pa{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;}
+  .pm-pop .pi{min-width:0;flex:1;}
+  .pm-pop .pi b{display:block;font-family:"Space Grotesk",inherit;font-size:13px;color:var(--ink);}
+  .pm-pop .pi span{display:block;font-size:12px;color:var(--muted);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .pm-pop .px{background:transparent;border:0;color:var(--muted);cursor:pointer;font-size:14px;padding:4px;}
+
+  /* Unread badge on users / pm button */
+  .icon-btn{position:relative;}
+  .badge-dot{position:absolute;top:-3px;right:-3px;min-width:18px;height:18px;padding:0 5px;
+    border-radius:99px;background:#ef4444;color:#fff;font-size:10px;font-weight:800;
+    display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(239,68,68,.5);
+    border:2px solid #fff;}
+
   .debug-box{margin-top:10px;padding:10px;border-radius:12px;background:#0b1733;color:#e5edff;font:11px/1.45 "Roboto Mono",monospace;
     white-space:pre-wrap;word-break:break-word;max-height:190px;overflow:auto;}
 
@@ -583,6 +627,39 @@
     <span>Merakam… <span id="recTimer">0:00</span></span>
     <button id="recStop" class="lmf-btn danger" style="padding:6px 12px;font-size:12px;">⏹ Hantar</button>
     <button id="recCancel" class="lmf-btn ghost" style="padding:6px 12px;font-size:12px;color:#fff;background:rgba(255,255,255,.15);">Batal</button>
+  </div>
+
+  
+  <!-- PM PRIVATE CHAT POPUP -->
+  <div id="pmModal" class="lmf-modal hidden" role="dialog" aria-modal="true" aria-labelledby="pmPeerName">
+    <div class="admin-backdrop"></div>
+    <div class="lmf-card pm-card">
+      <div class="lmf-hero">
+        <div class="ico" id="pmPeerAvatar">🙂</div>
+        <div style="flex:1;min-width:0;">
+          <h3 id="pmPeerName" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">PM</h3>
+          <p><span class="pm-lock-tag">🔒 PRIVATE</span> Hanya anda berdua nampak mesej ini.</p>
+        </div>
+        <button id="pmModalClose" class="icon-btn" title="Tutup">✕</button>
+      </div>
+      <div id="pmMessages" class="pm-messages"></div>
+      <div class="pm-composer">
+        <button id="pmAttachBtn" class="icon-btn" title="Lampiran">📎</button>
+        <input id="pmFileInput" type="file" style="display:none" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.rar,.txt" />
+        <input id="pmInput" class="lmf-input" type="text" placeholder="Tulis PM peribadi..." />
+        <button id="pmSendBtn" class="send-btn" title="Hantar PM">➤</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Incoming PM toast popup -->
+  <div id="pmPop" class="pm-pop" role="alert" aria-live="polite">
+    <div class="pa" id="pmPopAvatar">🙂</div>
+    <div class="pi">
+      <b id="pmPopName">—</b>
+      <span id="pmPopText">PM baru</span>
+    </div>
+    <button class="px" id="pmPopClose" title="Tutup">✕</button>
   </div>
 
   <div id="toast" class="toast"></div>
