@@ -3,7 +3,7 @@
  *  Backend: Google Apps Script Web App (Code.gs)
  *  ===================================================================== */
 
-const API_URL = ''; // <-- TAMPAL URL Web App Apps Script di sini
+const API_URL = 'https://script.google.com/macros/s/AKfycbxVGz059cuL-l7CEHABQ57UT46BMZz1CEy6tl27cCpXIMgwJlmmKVpWCj1124kQn9f15A/exec'; // <-- TAMPAL URL Web App Apps Script di sini
 
 const POLL_INTERVAL = 2500;
 const ADMIN_PASSWORD_HINT = '101010';
