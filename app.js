@@ -44,6 +44,16 @@ let session = null;
 let lastTs = 0;
 let pollTimer = null;
 let seenIds = new Set();
+let settings = { pmEnabled: false, theme: 'aurora' };
+let pmTarget = null; // {userId, name, avatar} or null
+let allUsers = [];
+
+// ---- mic / voice recording ----
+let mediaRecorder = null;
+let recChunks = [];
+let recStream = null;
+let recStartedAt = 0;
+let recTimerId = null;
 
 // ===================== AVATAR & EMOJI =====================
 const AVATARS = [
@@ -73,6 +83,9 @@ function init() {
   buildEmojiPicker();
   bindUI();
   bindPasteAndDrop();
+  applySettings(settings); // default theme attribute
+  // load global settings sebaik mungkin
+  api('getSettings').then(r => { if (r && r.ok && r.settings) applySettings(r.settings); }).catch(()=>{});
 
   const saved = loadSession();
   if (saved && saved.userId && saved.name) {
@@ -132,6 +145,14 @@ function bindUI() {
   // Call buttons — buka tab baru (lebih reliable berbanding iframe)
   $('btnAudioCall').onclick = () => startCall(false);
   $('btnVideoCall').onclick = () => startCall(true);
+
+  // New: users / settings / mic / pm
+  $('btnUsers').onclick = openUsersModal;
+  $('btnSettings').onclick = openSettingsModal;
+  $('btnMic').onclick = toggleMicRecord;
+  $('pmCloseBtn').onclick = closePM;
+  $('usersClose').onclick = () => $('usersModal').classList.add('hidden');
+  $('usersModal').querySelector('.admin-backdrop').onclick = () => $('usersModal').classList.add('hidden');
 
   // Image editor controls
   bindEditorUI();
@@ -495,8 +516,11 @@ window.addEventListener('focus', () => { unreadCount = 0; document.title = baseT
 
 async function fetchNew(initial) {
   try {
-    const res = await api('fetch', null, { since: lastTs });
+    const q = { since: lastTs };
+    if (session && session.userId) q.userId = session.userId;
+    const res = await api('fetch', null, q);
     if (!res || !res.ok) return;
+    if (res.settings) applySettings(res.settings);
     const msgs = res.messages || [];
     let newFromOther = 0;
     msgs.forEach(m => {
@@ -514,6 +538,7 @@ async function fetchNew(initial) {
         document.title = '(' + unreadCount + ') ' + baseTitle;
       }
     }
+    setStatus('🟢 Tersambung');
   } catch (e) {
     setStatus('🔴 Terputus');
   }
@@ -545,7 +570,7 @@ async function sendText() {
   $('emojiPicker').style.display = 'none';
   await api('send', {
     userId: session.userId, name: session.name, avatar: session.avatar,
-    type: 'text', content: txt
+    type: 'text', content: txt, toUserId: pmTarget ? pmTarget.userId : ''
   });
   fetchNew();
 }
@@ -564,7 +589,8 @@ async function handleFile(file) {
     else if ((file.type || '').startsWith('audio/')) type = 'audio';
     await api('send', {
       userId: session.userId, name: session.name, avatar: session.avatar,
-      type, content: up.view || up.url, fileUrl: up.url, fileName: file.name
+      type, content: up.view || up.url, fileUrl: up.url, fileName: file.name,
+      toUserId: pmTarget ? pmTarget.userId : ''
     });
     fetchNew();
   } catch (err) { showToast('Ralat upload: ' + err.message); }
@@ -620,7 +646,7 @@ function doClearAll() {
 function renderMessage(m, noAnim) {
   const mine = m.userId === session.userId;
   const row = document.createElement('div');
-  row.className = 'msg-row ' + (mine ? 'mine' : 'other') + (noAnim ? ' no-anim' : '');
+  row.className = 'msg-row ' + (mine ? 'mine' : 'other') + (m.toUserId ? ' pm' : '') + (noAnim ? ' no-anim' : '');
   const av = document.createElement('div'); av.className = 'msg-avatar'; av.textContent = m.avatar || '🙂';
   const bub = document.createElement('div'); bub.className = 'bubble ' + (mine ? 'bubble-mine' : 'bubble-other');
   if (!mine) {
@@ -690,4 +716,175 @@ async function api(action, body, queryExtra) {
     body: JSON.stringify({ action, ...(body || {}) })
   });
   return r.json();
+}
+
+
+// ===================== THEME / SETTINGS =====================
+function applySettings(s) {
+  const themeChanged = s.theme && s.theme !== settings.theme;
+  settings = Object.assign({}, settings, s);
+  document.body.setAttribute('data-theme', settings.theme || 'aurora');
+  // PM controls visibility
+  const btnU = $('btnUsers');
+  if (btnU) btnU.style.display = settings.pmEnabled ? '' : 'none';
+  if (!settings.pmEnabled && pmTarget) closePM();
+  if (themeChanged) showToast('🎨 Tema ditukar: ' + (settings.theme || 'aurora'));
+}
+
+// ===================== PM (PERSONAL MESSAGE) =====================
+function setPMTarget(u) {
+  if (!settings.pmEnabled) { showToast('PM peribadi sedang dimatikan oleh admin'); return; }
+  pmTarget = { userId: u.userId, name: u.name, avatar: u.avatar };
+  $('pmTargetName').textContent = (u.avatar || '🙂') + ' ' + u.name;
+  $('pmBanner').classList.add('show');
+  $('inputMsg').placeholder = 'PM peribadi kepada ' + u.name + '…';
+  $('inputMsg').focus();
+}
+function closePM() {
+  pmTarget = null;
+  $('pmBanner').classList.remove('show');
+  $('inputMsg').placeholder = 'Tulis mesej... (Ctrl+V untuk tampal screenshot)';
+}
+
+async function openUsersModal() {
+  if (!settings.pmEnabled) { showToast('PM peribadi sedang dimatikan oleh admin'); return; }
+  const modal = $('usersModal');
+  modal.classList.remove('hidden');
+  const list = $('userList');
+  list.innerHTML = '<div style="text-align:center;color:var(--muted);padding:10px;">Memuat…</div>';
+  try {
+    const res = await api('users');
+    if (!res.ok) { list.innerHTML = '<div style="color:#dc2626;text-align:center;">Gagal memuat</div>'; return; }
+    allUsers = res.users || [];
+    renderUserList();
+  } catch (e) { list.innerHTML = '<div style="color:#dc2626;text-align:center;">Ralat rangkaian</div>'; }
+}
+function renderUserList() {
+  const list = $('userList');
+  list.innerHTML = '';
+  const now = Date.now();
+  // sort: most recent first
+  const sorted = allUsers.slice().sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+  sorted.forEach(u => {
+    const isMe = session && u.userId === session.userId;
+    const online = (now - (u.lastSeen || 0)) < 60000;
+    const d = document.createElement('div');
+    d.className = 'user-item' + (isMe ? ' me' : '');
+    d.innerHTML = '<div class="uav">' + (u.avatar || '🙂') + '</div>' +
+                  '<div><div class="uname">' + escapeHtml(u.name || '—') + (isMe ? ' (Anda)' : '') + '</div></div>' +
+                  '<div class="ustat">' + (online ? '🟢 Online' : '⚪ ' + timeAgo(u.lastSeen)) + '</div>';
+    if (!isMe) d.onclick = () => { setPMTarget(u); $('usersModal').classList.add('hidden'); };
+    list.appendChild(d);
+  });
+  if (!sorted.length) list.innerHTML = '<div style="text-align:center;color:var(--muted);padding:10px;">Tiada pengguna lain</div>';
+}
+function timeAgo(ts) {
+  if (!ts) return 'lama';
+  const m = Math.floor((Date.now() - ts) / 60000);
+  if (m < 1) return 'baru';
+  if (m < 60) return m + 'm lalu';
+  const h = Math.floor(m / 60); if (h < 24) return h + 'j lalu';
+  return Math.floor(h / 24) + 'h lalu';
+}
+
+// ===================== ADMIN SETTINGS MODAL =====================
+let pendingTheme = null;
+let pendingPM = null;
+function openSettingsModal() {
+  const modal = $('settingsModal');
+  pendingTheme = settings.theme || 'aurora';
+  pendingPM = !!settings.pmEnabled;
+  // mark theme
+  document.querySelectorAll('#themeGrid .theme-pick').forEach(p => {
+    p.classList.toggle('selected', p.dataset.theme === pendingTheme);
+    p.onclick = () => {
+      pendingTheme = p.dataset.theme;
+      document.querySelectorAll('#themeGrid .theme-pick').forEach(x => x.classList.remove('selected'));
+      p.classList.add('selected');
+    };
+  });
+  const sw = $('pmSwitch');
+  sw.classList.toggle('on', pendingPM);
+  sw.onclick = () => { pendingPM = !pendingPM; sw.classList.toggle('on', pendingPM); };
+  $('settingsPwd').value = '';
+  $('settingsErr').textContent = '';
+  modal.classList.remove('hidden');
+  $('settingsCancel').onclick = () => modal.classList.add('hidden');
+  modal.querySelector('.admin-backdrop').onclick = () => modal.classList.add('hidden');
+  $('settingsSave').onclick = async () => {
+    const p = $('settingsPwd').value;
+    if (!p) { $('settingsErr').textContent = 'Sila masukkan kata laluan admin.'; return; }
+    $('settingsSave').disabled = true;
+    try {
+      const res = await api('setSettings', { password: p, theme: pendingTheme, pmEnabled: pendingPM });
+      if (res.ok) {
+        applySettings(res.settings || { theme: pendingTheme, pmEnabled: pendingPM });
+        modal.classList.add('hidden');
+        showToast('✅ Tetapan disimpan');
+      } else {
+        $('settingsErr').textContent = '❌ ' + (res.error || 'Gagal');
+      }
+    } catch (e) { $('settingsErr').textContent = '❌ Ralat rangkaian'; }
+    finally { $('settingsSave').disabled = false; }
+  };
+}
+
+// ===================== VOICE MESSAGE (mic) =====================
+async function toggleMicRecord() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    stopRecording(true);
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showToast('Browser tidak sokong rakaman audio', 3000); return;
+  }
+  try {
+    recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    showToast('Akses mikrofon ditolak: ' + (e.message || e), 3500); return;
+  }
+  recChunks = [];
+  const mimeOpts = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg'];
+  let chosenMime = '';
+  for (const m of mimeOpts) { if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) { chosenMime = m; break; } }
+  try {
+    mediaRecorder = chosenMime ? new MediaRecorder(recStream, { mimeType: chosenMime }) : new MediaRecorder(recStream);
+  } catch (e) { showToast('Tidak boleh mula merakam: ' + e.message, 3500); cleanupRec(); return; }
+  mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+  mediaRecorder.onstop = onRecStop;
+  mediaRecorder.start();
+  recStartedAt = Date.now();
+  $('btnMic').classList.add('recording');
+  $('recOverlay').classList.add('show');
+  $('recStop').onclick = () => stopRecording(true);
+  $('recCancel').onclick = () => stopRecording(false);
+  recTimerId = setInterval(() => {
+    const s = Math.floor((Date.now() - recStartedAt) / 1000);
+    $('recTimer').textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    if (s >= 120) stopRecording(true); // max 2 min
+  }, 250);
+}
+let _recSend = true;
+function stopRecording(send) {
+  _recSend = send;
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    try { mediaRecorder.stop(); } catch(_) {}
+  }
+}
+async function onRecStop() {
+  const send = _recSend;
+  const mime = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
+  const blob = new Blob(recChunks, { type: mime });
+  cleanupRec();
+  if (!send || blob.size < 500) { showToast('Rakaman dibatalkan'); return; }
+  const ext = mime.indexOf('mp4') >= 0 ? 'm4a' : mime.indexOf('ogg') >= 0 ? 'ogg' : 'webm';
+  const f = new File([blob], 'voice-' + Date.now() + '.' + ext, { type: mime });
+  handleFile(f);
+}
+function cleanupRec() {
+  $('btnMic').classList.remove('recording');
+  $('recOverlay').classList.remove('show');
+  if (recTimerId) { clearInterval(recTimerId); recTimerId = null; }
+  if (recStream) { recStream.getTracks().forEach(t => t.stop()); recStream = null; }
+  mediaRecorder = null; recChunks = [];
 }

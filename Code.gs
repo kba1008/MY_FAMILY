@@ -9,7 +9,8 @@
  *    - Execute as: Me
  *    - Who has access: Anyone
  * 4. Copy URL Web App dan paste ke dalam app.js (API_URL)
- * 5. Pastikan akaun anda ada akses pada Sheet & Folder di bawah.
+ *
+ * Versi: v3 (PM peribadi, tema, voice message)
  */
 
 const SHEET_ID  = '1ZVuobkfCX2AYM6aN6oPRFO8-gd95dQevYs7ngLkZsZY';
@@ -18,6 +19,7 @@ const ADMIN_PASSWORD = '101010';
 
 const SHEET_MESSAGES = 'Messages';
 const SHEET_USERS    = 'Users';
+const SHEET_SETTINGS = 'Settings';
 
 // ===================== ENTRY POINTS =====================
 
@@ -36,14 +38,16 @@ function handle(e, action, data) {
     ensureSheets();
     let out;
     switch (action) {
-      case 'fetch':    out = fetchMessages(Number(data.since) || 0); break;
-      case 'send':     out = sendMessage(data); break;
-      case 'upload':   out = uploadFile(data); break;
-      case 'register': out = registerUser(data); break;
-      case 'users':    out = listUsers(); break;
-      case 'clear':    out = clearAll(data.password); break;
-      case 'ping':     out = { ok: true, time: Date.now() }; break;
-      default:         out = { ok: false, error: 'Unknown action: ' + action };
+      case 'fetch':       out = fetchMessages(Number(data.since) || 0, String(data.userId || '')); break;
+      case 'send':        out = sendMessage(data); break;
+      case 'upload':      out = uploadFile(data); break;
+      case 'register':    out = registerUser(data); break;
+      case 'users':       out = listUsers(); break;
+      case 'clear':       out = clearAll(data.password); break;
+      case 'getSettings': out = { ok: true, settings: getSettings() }; break;
+      case 'setSettings': out = setSettings(data); break;
+      case 'ping':        out = { ok: true, time: Date.now() }; break;
+      default:            out = { ok: false, error: 'Unknown action: ' + action };
     }
     return json(out, e);
   } catch (err) {
@@ -53,29 +57,43 @@ function handle(e, action, data) {
 
 // ===================== HANDLERS =====================
 
-function fetchMessages(since) {
+function fetchMessages(since, viewerId) {
   const sh = sheet(SHEET_MESSAGES);
   const last = sh.getLastRow();
-  if (last < 2) return { ok: true, messages: [], serverTime: Date.now() };
-  const values = sh.getRange(2, 1, last - 1, 9).getValues();
+  const settings = getSettings();
+  if (last < 2) return { ok: true, messages: [], serverTime: Date.now(), settings: settings };
+  const values = sh.getRange(2, 1, last - 1, 10).getValues();
   const msgs = values
     .map(r => ({
       id: r[0], ts: Number(r[1]) || 0, userId: r[2], name: r[3],
       avatar: r[4], type: r[5] || 'text', content: r[6] || '',
-      fileUrl: r[7] || '', fileName: r[8] || ''
+      fileUrl: r[7] || '', fileName: r[8] || '',
+      toUserId: r[9] || ''
     }))
-    .filter(m => m.ts > since);
-  return { ok: true, messages: msgs, serverTime: Date.now() };
+    .filter(m => {
+      if (m.ts <= since) return false;
+      if (!m.toUserId) return true; // public
+      // PM: hanya pengirim atau penerima boleh nampak
+      return viewerId && (m.userId === viewerId || m.toUserId === viewerId);
+    });
+  return { ok: true, messages: msgs, serverTime: Date.now(), settings: settings };
 }
 
 function sendMessage(data) {
   const sh = sheet(SHEET_MESSAGES);
   const ts = Date.now();
   const id = 'm_' + ts + '_' + Math.random().toString(36).slice(2, 8);
+  const toUserId = String(data.toUserId || '');
+  // Jika PM dihantar tetapi feature PM dimatikan, tolak
+  if (toUserId) {
+    const s = getSettings();
+    if (!s.pmEnabled) return { ok: false, error: 'PM peribadi sedang dimatikan oleh admin.' };
+  }
   sh.appendRow([
     id, ts, String(data.userId || ''), String(data.name || 'Anon'),
     String(data.avatar || '🙂'), String(data.type || 'text'),
-    String(data.content || ''), String(data.fileUrl || ''), String(data.fileName || '')
+    String(data.content || ''), String(data.fileUrl || ''), String(data.fileName || ''),
+    toUserId
   ]);
   touchUser(data.userId, data.name, data.avatar);
   return { ok: true, id: id, ts: ts };
@@ -118,6 +136,43 @@ function clearAll(password) {
   return { ok: true, cleared: true };
 }
 
+// ===================== SETTINGS =====================
+
+function getSettings() {
+  const sh = sheet(SHEET_SETTINGS);
+  const last = sh.getLastRow();
+  const out = { pmEnabled: false, theme: 'aurora' };
+  if (last >= 2) {
+    const v = sh.getRange(2, 1, last - 1, 2).getValues();
+    v.forEach(r => {
+      const k = String(r[0] || '').trim();
+      const val = String(r[1] || '');
+      if (k === 'pmEnabled') out.pmEnabled = (val === 'true' || val === '1');
+      else if (k === 'theme') out.theme = val || 'aurora';
+    });
+  }
+  return out;
+}
+
+function setSettings(data) {
+  if (String(data.password) !== ADMIN_PASSWORD) return { ok: false, error: 'Kata laluan admin salah' };
+  const sh = sheet(SHEET_SETTINGS);
+  const updates = {};
+  if (typeof data.pmEnabled !== 'undefined') updates.pmEnabled = data.pmEnabled ? 'true' : 'false';
+  if (typeof data.theme !== 'undefined' && data.theme) updates.theme = String(data.theme);
+  const last = sh.getLastRow();
+  const existing = {};
+  if (last >= 2) {
+    const v = sh.getRange(2, 1, last - 1, 2).getValues();
+    v.forEach((r, i) => { existing[String(r[0] || '').trim()] = i + 2; });
+  }
+  Object.keys(updates).forEach(k => {
+    if (existing[k]) sh.getRange(existing[k], 2).setValue(updates[k]);
+    else sh.appendRow([k, updates[k]]);
+  });
+  return { ok: true, settings: getSettings() };
+}
+
 // ===================== HELPERS =====================
 
 function touchUser(userId, name, avatar, isNew) {
@@ -144,14 +199,25 @@ function ensureSheets() {
   let m = ss.getSheetByName(SHEET_MESSAGES);
   if (!m) {
     m = ss.insertSheet(SHEET_MESSAGES);
-    m.appendRow(['id', 'timestamp', 'userId', 'name', 'avatar', 'type', 'content', 'fileUrl', 'fileName']);
+    m.appendRow(['id', 'timestamp', 'userId', 'name', 'avatar', 'type', 'content', 'fileUrl', 'fileName', 'toUserId']);
     m.setFrozenRows(1);
+  } else if (m.getLastColumn() < 10) {
+    // upgrade: add toUserId column
+    m.getRange(1, 10).setValue('toUserId');
   }
   let u = ss.getSheetByName(SHEET_USERS);
   if (!u) {
     u = ss.insertSheet(SHEET_USERS);
     u.appendRow(['userId', 'name', 'avatar', 'joined', 'lastSeen']);
     u.setFrozenRows(1);
+  }
+  let s = ss.getSheetByName(SHEET_SETTINGS);
+  if (!s) {
+    s = ss.insertSheet(SHEET_SETTINGS);
+    s.appendRow(['key', 'value']);
+    s.setFrozenRows(1);
+    s.appendRow(['pmEnabled', 'false']);
+    s.appendRow(['theme', 'aurora']);
   }
 }
 
