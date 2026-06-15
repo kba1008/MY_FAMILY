@@ -1,0 +1,25 @@
+{
+  "name": "LOVE MY FAMILY",
+  "short_name": "LMF Chat",
+  "description": "Chat room keluarga - WhatsApp style PWA",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b141a",
+  "theme_color": "#075E54",
+  "icons": [
+    {
+      "src": "https://api.dicebear.com/9.x/icons/png?seed=love-my-family&size=192&backgroundColor=075E54",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "https://api.dicebear.com/9.x/icons/png?seed=love-my-family&size=512&backgroundColor=075E54",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
