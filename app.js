@@ -3,7 +3,7 @@
  *  Backend: Google Apps Script Web App (Code.gs)
  *  ===================================================================== */
 
-const API_URL = 'https://script.google.com/macros/s/AKfycbzzjtgWB7aj2KXJH_PlehvGTb8DRDcQTqMjEhEHggIotEyuRZHu8EqgEmgQJmGkr_6NLQ/exec'; // <-- TAMPAL URL Web App Apps Script di sini
+const API_URL = 'https://script.google.com/macros/s/AKfycbxVGz059cuL-l7CEHABQ57UT46BMZz1CEy6tl27cCpXIMgwJlmmKVpWCj1124kQn9f15A/exec'; // <-- TAMPAL URL Web App Apps Script di sini
 
 const POLL_INTERVAL = 2500;
 // (Kata laluan admin disimpan di server sahaja — tidak didedahkan di UI)
@@ -587,9 +587,10 @@ async function handleFile(file) {
     if ((file.type || '').startsWith('image/')) type = 'image';
     else if ((file.type || '').startsWith('video/')) type = 'video';
     else if ((file.type || '').startsWith('audio/')) type = 'audio';
+    const playbackUrl = (type === 'audio') ? normalizeDriveAudioUrl(up.url || up.view) : (up.url || up.view);
     await api('send', {
       userId: session.userId, name: session.name, avatar: session.avatar,
-      type, content: up.view || up.url, fileUrl: up.url, fileName: file.name,
+      type, content: up.view || up.url, fileUrl: playbackUrl, fileName: file.name,
       toUserId: pmTarget ? pmTarget.userId : ''
     });
     fetchNew();
@@ -663,7 +664,7 @@ function renderMessage(m, noAnim) {
     const v = document.createElement('video'); v.className = 'media';
     v.src = m.fileUrl || m.content; v.controls = true; body.appendChild(v);
   } else if (m.type === 'audio') {
-    const a = document.createElement('audio'); a.src = m.fileUrl || m.content; a.controls = true; body.appendChild(a);
+    body.appendChild(createVoicePlayer(m));
   } else if (m.type === 'file') {
     const a = document.createElement('a');
     a.href = m.content || m.fileUrl; a.target = '_blank'; a.rel = 'noopener';
@@ -678,6 +679,100 @@ function renderMessage(m, noAnim) {
   row.appendChild(av); row.appendChild(bub);
   $('messages').appendChild(row);
   scrollBottom();
+}
+
+function normalizeDriveAudioUrl(url) {
+  url = String(url || '');
+  const idMatch = url.match(/[?&]id=([^&]+)/) || url.match(/\/d\/([^/]+)/);
+  if (idMatch && /drive\.google\.com/.test(url)) {
+    return 'https://drive.google.com/uc?export=download&id=' + encodeURIComponent(idMatch[1]);
+  }
+  return url;
+}
+function extractDriveFileId(url) {
+  url = String(url || '');
+  const m = url.match(/[?&]id=([^&]+)/) || url.match(/\/d\/([^/]+)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
+function base64ToBlob(base64, mime) {
+  const bin = atob(base64);
+  const chunks = [];
+  for (let i = 0; i < bin.length; i += 8192) {
+    const part = bin.slice(i, i + 8192);
+    const arr = new Uint8Array(part.length);
+    for (let j = 0; j < part.length; j++) arr[j] = part.charCodeAt(j);
+    chunks.push(arr);
+  }
+  return new Blob(chunks, { type: mime || 'audio/webm' });
+}
+
+async function loadAudioViaBackend(url, audio, label) {
+  const fileId = extractDriveFileId(url);
+  if (!fileId) throw new Error('File ID audio tidak dijumpai');
+  label.querySelector('span').textContent = 'Membuka audio melalui server…';
+  const res = await api('file', { fileId: fileId });
+  if (!res.ok) throw new Error(res.error || 'Gagal ambil audio');
+  const blob = base64ToBlob(res.base64, res.mimeType);
+  const blobUrl = URL.createObjectURL(blob);
+  audio.src = blobUrl;
+  audio.dataset.blobUrl = blobUrl;
+  return blobUrl;
+}
+
+function createVoicePlayer(m) {
+  const wrap = document.createElement('div');
+  wrap.className = 'voice-player';
+  const url = normalizeDriveAudioUrl(m.fileUrl || m.content);
+  const play = document.createElement('button');
+  play.type = 'button';
+  play.className = 'voice-play';
+  play.textContent = '▶️';
+  const label = document.createElement('div');
+  label.className = 'voice-label';
+  label.innerHTML = '<b>Voice message</b><span>Tap untuk play</span>';
+  const open = document.createElement('a');
+  open.href = url;
+  open.target = '_blank';
+  open.rel = 'noopener';
+  open.className = 'voice-open';
+  open.textContent = '↗';
+  open.title = 'Buka audio jika browser sekat playback';
+  const audio = document.createElement('audio');
+  audio.preload = 'none';
+  audio.src = url;
+  audio.controls = true;
+  audio.style.display = 'none';
+  play.onclick = async () => {
+    try {
+      audio.style.display = 'block';
+      if (audio.paused) {
+        await audio.play();
+        play.textContent = '⏸️';
+        label.querySelector('span').textContent = 'Sedang dimainkan';
+      } else {
+        audio.pause();
+        play.textContent = '▶️';
+        label.querySelector('span').textContent = 'Dijeda';
+      }
+    } catch (e) {
+      try {
+        if (!audio.dataset.blobUrl) await loadAudioViaBackend(url, audio, label);
+        await audio.play();
+        play.textContent = '⏸️';
+        label.querySelector('span').textContent = 'Sedang dimainkan';
+      } catch (e2) {
+        label.querySelector('span').textContent = 'Gagal play — tap ↗ untuk buka/download';
+        showToast('Audio tak boleh play: tekan ikon ↗. Ralat: ' + (e2.message || e2 || e.message || ''), 6500);
+      }
+    }
+  };
+  audio.onended = () => { play.textContent = '▶️'; label.querySelector('span').textContent = 'Selesai'; };
+  audio.onerror = () => {
+    label.querySelector('span').textContent = 'Gagal play — tap ↗ untuk buka/download';
+  };
+  wrap.appendChild(play); wrap.appendChild(label); wrap.appendChild(open); wrap.appendChild(audio);
+  return wrap;
 }
 function scrollBottom() { const m = $('messages'); m.scrollTop = m.scrollHeight; }
 function formatTime(ts) {
@@ -708,14 +803,18 @@ async function api(action, body, queryExtra) {
   if (action === 'fetch' || action === 'users' || action === 'ping') {
     const q = new URLSearchParams({ action, ...(queryExtra || {}) }).toString();
     const r = await fetch(API_URL + '?' + q, { method: 'GET' });
-    return r.json();
+    const txt = await r.text();
+    try { return JSON.parse(txt); }
+    catch (_) { return { ok: false, error: 'Response bukan JSON: ' + txt.slice(0, 260) }; }
   }
   const r = await fetch(API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify({ action, ...(body || {}) })
   });
-  return r.json();
+  const txt = await r.text();
+  try { return JSON.parse(txt); }
+  catch (_) { return { ok: false, error: 'Response bukan JSON: ' + txt.slice(0, 260) }; }
 }
 
 
@@ -811,6 +910,8 @@ function openSettingsModal() {
   modal.classList.remove('hidden');
   $('settingsCancel').onclick = () => modal.classList.add('hidden');
   modal.querySelector('.admin-backdrop').onclick = () => modal.classList.add('hidden');
+  const testBtn = $('settingsTest');
+  if (testBtn) testBtn.onclick = runSettingsDebugTest;
   $('settingsSave').onclick = async () => {
     const p = $('settingsPwd').value;
     if (!p) { $('settingsErr').textContent = 'Sila masukkan kata laluan admin.'; return; }
@@ -826,9 +927,27 @@ function openSettingsModal() {
       } else {
         $('settingsErr').textContent = '❌ ' + (res.error || 'Gagal');
       }
-    } catch (e) { $('settingsErr').textContent = '❌ Ralat rangkaian'; }
+    } catch (e) { $('settingsErr').textContent = '❌ Ralat rangkaian: ' + (e.message || e); }
     finally { $('settingsSave').disabled = false; }
   };
+}
+
+async function runSettingsDebugTest() {
+  const p = $('settingsPwd').value;
+  const box = $('settingsDebug');
+  if (!p) { $('settingsErr').textContent = 'Masukkan kata laluan admin dahulu untuk run test.'; return; }
+  $('settingsErr').textContent = '';
+  box.classList.remove('hidden');
+  box.textContent = '⏳ Menjalankan test backend...';
+  try {
+    const res = await api('debug', { password: p });
+    box.textContent = JSON.stringify(res, null, 2);
+    if (!res.ok && res.error && /Unknown action/i.test(res.error)) {
+      $('settingsErr').innerHTML = '⚠️ Backend masih versi lama. Tampal Code.gs terbaru, Save, kemudian Deploy → Manage deployments → ✏️ → Version: <b>New version</b> → Deploy.';
+    }
+  } catch (e) {
+    box.textContent = '❌ ' + (e.message || e);
+  }
 }
 
 // ===================== VOICE MESSAGE (mic) =====================

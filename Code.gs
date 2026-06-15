@@ -10,16 +10,59 @@
  *    - Who has access: Anyone
  * 4. Copy URL Web App dan paste ke dalam app.js (API_URL)
  *
- * Versi: v3 (PM peribadi, tema, voice message)
+ * Versi: v5 (debug test, setting admin, audio playback fix)
  */
 
 const SHEET_ID  = '1ZVuobkfCX2AYM6aN6oPRFO8-gd95dQevYs7ngLkZsZY';
 const FOLDER_ID = '1XHJqxu6G-5QzBguVutpKR8QU--w8uBSn';
 const ADMIN_PASSWORD = '101010';
+const APP_VERSION = 'LMF-v5-debug-settings-audio';
 
 const SHEET_MESSAGES = 'Messages';
 const SHEET_USERS    = 'Users';
 const SHEET_SETTINGS = 'Settings';
+
+// ===================== RUN TEST DI APPS SCRIPT =====================
+// Cara guna: pilih function ini di dropdown Apps Script, tekan Run, kemudian buka Execution log.
+function RUN_TEST_BACKEND() {
+  return runAndLog_('RUN_TEST_BACKEND', function () {
+    ensureSheets();
+    return debugBackend(ADMIN_PASSWORD);
+  });
+}
+
+function RUN_TEST_SAVE_SETTINGS_ON() {
+  return runAndLog_('RUN_TEST_SAVE_SETTINGS_ON', function () {
+    ensureSheets();
+    return setSettings({ password: ADMIN_PASSWORD, pmEnabled: true, theme: 'emerald' });
+  });
+}
+
+function RUN_TEST_SAVE_SETTINGS_OFF() {
+  return runAndLog_('RUN_TEST_SAVE_SETTINGS_OFF', function () {
+    ensureSheets();
+    return setSettings({ password: ADMIN_PASSWORD, pmEnabled: false, theme: 'aurora' });
+  });
+}
+
+function runAndLog_(label, fn) {
+  try {
+    const out = fn();
+    Logger.log(label + ' ✅ SUCCESS');
+    Logger.log(JSON.stringify(out, null, 2));
+    return out;
+  } catch (err) {
+    const out = {
+      ok: false,
+      test: label,
+      error: String(err && err.message || err),
+      stack: String(err && err.stack || '')
+    };
+    Logger.log(label + ' ❌ ERROR');
+    Logger.log(JSON.stringify(out, null, 2));
+    return out;
+  }
+}
 
 // ===================== ENTRY POINTS =====================
 
@@ -41,17 +84,19 @@ function handle(e, action, data) {
       case 'fetch':       out = fetchMessages(Number(data.since) || 0, String(data.userId || '')); break;
       case 'send':        out = sendMessage(data); break;
       case 'upload':      out = uploadFile(data); break;
+      case 'file':        out = getFileData(data); break;
       case 'register':    out = registerUser(data); break;
       case 'users':       out = listUsers(); break;
       case 'clear':       out = clearAll(data.password); break;
       case 'getSettings': out = { ok: true, settings: getSettings() }; break;
       case 'setSettings': out = setSettings(data); break;
+      case 'debug':       out = debugBackend(data.password); break;
       case 'ping':        out = { ok: true, time: Date.now() }; break;
-      default:            out = { ok: false, error: 'Unknown action: ' + action };
+      default:            out = { ok: false, error: 'Unknown action: ' + action, version: APP_VERSION };
     }
     return json(out, e);
   } catch (err) {
-    return json({ ok: false, error: String(err && err.message || err) }, e);
+    return json({ ok: false, error: String(err && err.message || err), action: action, version: APP_VERSION }, e);
   }
 }
 
@@ -115,6 +160,53 @@ function uploadFile(data) {
   return { ok: true, id: id, url: url, view: view, mimeType: mime, fileName: file.getName(), size: file.getSize() };
 }
 
+function getFileData(data) {
+  data = data || {};
+  const id = String(data.fileId || extractDriveId_(data.url || '') || '');
+  if (!id) return { ok: false, error: 'File ID tidak dijumpai' };
+  const file = DriveApp.getFileById(id);
+  const blob = file.getBlob();
+  return {
+    ok: true,
+    id: id,
+    fileName: file.getName(),
+    mimeType: blob.getContentType() || file.getMimeType() || 'application/octet-stream',
+    base64: Utilities.base64Encode(blob.getBytes()),
+    version: APP_VERSION
+  };
+}
+
+function extractDriveId_(url) {
+  url = String(url || '');
+  let m = url.match(/[?&]id=([^&]+)/);
+  if (m) return decodeURIComponent(m[1]);
+  m = url.match(/\/d\/([^/]+)/);
+  if (m) return decodeURIComponent(m[1]);
+  return '';
+}
+
+function debugBackend(password) {
+  if (String(password) !== ADMIN_PASSWORD) return { ok: false, error: 'Kata laluan admin salah' };
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const folder = DriveApp.getFolderById(FOLDER_ID);
+  const names = ss.getSheets().map(s => s.getName());
+  const settingsBefore = getSettings();
+  const saved = setSettings({ password: ADMIN_PASSWORD, pmEnabled: settingsBefore.pmEnabled, theme: settingsBefore.theme });
+  return {
+    ok: true,
+    version: APP_VERSION,
+    time: new Date().toISOString(),
+    spreadsheetName: ss.getName(),
+    folderName: folder.getName(),
+    sheets: names,
+    messagesColumns: sheet(SHEET_MESSAGES).getLastColumn(),
+    settingsBefore: settingsBefore,
+    saveSettingsTest: saved,
+    availableActions: ['fetch','send','upload','file','register','users','clear','getSettings','setSettings','debug','ping'],
+    note: 'Jika test ini berjaya tetapi app masih Unknown action, Web App belum redeploy New version.'
+  };
+}
+
 function registerUser(data) {
   touchUser(data.userId, data.name, data.avatar, true);
   return { ok: true };
@@ -155,11 +247,20 @@ function getSettings() {
 }
 
 function setSettings(data) {
+  data = data || {};
   if (String(data.password) !== ADMIN_PASSWORD) return { ok: false, error: 'Kata laluan admin salah' };
+  ensureSheets();
   const sh = sheet(SHEET_SETTINGS);
+  if (!sh) return { ok: false, error: 'Sheet Settings tidak dijumpai / tidak boleh dibuka' };
   const updates = {};
   if (typeof data.pmEnabled !== 'undefined') updates.pmEnabled = data.pmEnabled ? 'true' : 'false';
-  if (typeof data.theme !== 'undefined' && data.theme) updates.theme = String(data.theme);
+  if (typeof data.theme !== 'undefined' && data.theme) {
+    const theme = String(data.theme);
+    const allowed = ['aurora','rose','emerald','sunset','midnight'];
+    if (allowed.indexOf(theme) === -1) return { ok: false, error: 'Tema tidak sah: ' + theme };
+    updates.theme = theme;
+  }
+  if (!Object.keys(updates).length) return { ok: false, error: 'Tiada tetapan untuk disimpan' };
   const last = sh.getLastRow();
   const existing = {};
   if (last >= 2) {
@@ -170,7 +271,8 @@ function setSettings(data) {
     if (existing[k]) sh.getRange(existing[k], 2).setValue(updates[k]);
     else sh.appendRow([k, updates[k]]);
   });
-  return { ok: true, settings: getSettings() };
+  SpreadsheetApp.flush();
+  return { ok: true, settings: getSettings(), version: APP_VERSION };
 }
 
 // ===================== HELPERS =====================
