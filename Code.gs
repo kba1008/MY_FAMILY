@@ -10,13 +10,13 @@
  *    - Who has access: Anyone
  * 4. Copy URL Web App dan paste ke dalam app.js (API_URL)
  *
- * Versi: v5 (debug test, setting admin, audio playback fix)
+ * Versi: v7 (PM popup-only, clickable names, online header)
  */
 
 const SHEET_ID  = '1ZVuobkfCX2AYM6aN6oPRFO8-gd95dQevYs7ngLkZsZY';
 const FOLDER_ID = '1XHJqxu6G-5QzBguVutpKR8QU--w8uBSn';
 const ADMIN_PASSWORD = '101010';
-const APP_VERSION = 'LMF-v5-debug-settings-audio';
+const APP_VERSION = 'LMF-v7-pm-popup-online-header';
 
 const SHEET_MESSAGES = 'Messages';
 const SHEET_USERS    = 'Users';
@@ -81,12 +81,19 @@ function handle(e, action, data) {
     ensureSheets();
     let out;
     switch (action) {
-      case 'fetch':       out = fetchMessages(Number(data.since) || 0, String(data.userId || '')); break;
+      case 'fetch':
+        if (data.userId) touchUser(data.userId, data.name, data.avatar);
+        out = fetchMessages(Number(data.since) || 0, String(data.userId || ''));
+        break;
       case 'send':        out = sendMessage(data); break;
+      case 'sendPM':      out = sendPrivateMessage(data); break;
       case 'upload':      out = uploadFile(data); break;
       case 'file':        out = getFileData(data); break;
       case 'register':    out = registerUser(data); break;
-      case 'users':       out = listUsers(); break;
+      case 'users':
+        if (data.userId) touchUser(data.userId, data.name, data.avatar);
+        out = listUsers();
+        break;
       case 'clear':       out = clearAll(data.password); break;
       case 'getSettings': out = { ok: true, settings: getSettings() }; break;
       case 'setSettings': out = setSettings(data); break;
@@ -124,11 +131,14 @@ function fetchMessages(since, viewerId) {
   return { ok: true, messages: msgs, serverTime: Date.now(), settings: settings };
 }
 
-function sendMessage(data) {
+function sendMessage(data, allowPrivate) {
   const sh = sheet(SHEET_MESSAGES);
   const ts = Date.now();
   const id = 'm_' + ts + '_' + Math.random().toString(36).slice(2, 8);
   const toUserId = String(data.toUserId || '');
+  if (toUserId && !allowPrivate) {
+    return { ok: false, error: 'PM mesti dihantar melalui popup peribadi.' };
+  }
   // Jika PM dihantar tetapi feature PM dimatikan, tolak
   if (toUserId) {
     const s = getSettings();
@@ -142,6 +152,14 @@ function sendMessage(data) {
   ]);
   touchUser(data.userId, data.name, data.avatar);
   return { ok: true, id: id, ts: ts };
+}
+
+function sendPrivateMessage(data) {
+  data = data || {};
+  const toUserId = String(data.toUserId || '');
+  if (!toUserId) return { ok: false, error: 'PM mesti ada penerima.' };
+  if (String(data.userId || '') === toUserId) return { ok: false, error: 'Tidak boleh PM diri sendiri.' };
+  return sendMessage(data, true);
 }
 
 function uploadFile(data) {
@@ -202,7 +220,7 @@ function debugBackend(password) {
     messagesColumns: sheet(SHEET_MESSAGES).getLastColumn(),
     settingsBefore: settingsBefore,
     saveSettingsTest: saved,
-    availableActions: ['fetch','send','upload','file','register','users','clear','getSettings','setSettings','debug','ping'],
+    availableActions: ['fetch','send','sendPM','upload','file','register','users','clear','getSettings','setSettings','debug','ping'],
     note: 'Jika test ini berjaya tetapi app masih Unknown action, Web App belum redeploy New version.'
   };
 }

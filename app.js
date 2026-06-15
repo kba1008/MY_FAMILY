@@ -3,7 +3,7 @@
  *  Backend: Google Apps Script Web App (Code.gs)
  *  ===================================================================== */
 
-const API_URL = 'https://script.google.com/macros/s/AKfycbz1nEls_MBS4B98BEDazTDmdryU0gM1XcTI0IQbnJl_oRUCDCNh3eJBs1A4mM6ZEQbovw/exec'; // <-- TAMPAL URL Web App Apps Script di sini
+const API_URL = 'https://script.google.com/macros/s/AKfycbxVGz059cuL-l7CEHABQ57UT46BMZz1CEy6tl27cCpXIMgwJlmmKVpWCj1124kQn9f15A/exec'; // <-- TAMPAL URL Web App Apps Script di sini
 
 const POLL_INTERVAL = 2500;
 // (Kata laluan admin disimpan di server sahaja — tidak didedahkan di UI)
@@ -47,6 +47,7 @@ let seenIds = new Set();
 let settings = { pmEnabled: false, theme: 'aurora' };
 let pmTarget = null; // {userId, name, avatar} or null
 let allUsers = [];
+let usersLastFetch = 0;
 let pmConversations = {}; // peerUserId -> [{m, mine}]
 let pmActivePeer = null;  // peer being viewed in popup
 let pmUnreadByPeer = {};  // peerId -> unread count (when popup closed / other peer open)
@@ -99,7 +100,9 @@ function init() {
   }
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    navigator.serviceWorker.register('./sw.js').then((reg) => {
+      try { reg.update(); } catch (_) {}
+    }).catch(() => {});
   }
 }
 
@@ -154,7 +157,8 @@ function bindUI() {
   $('btnUsers').onclick = openUsersModal;
   $('btnSettings').onclick = openSettingsModal;
   $('btnMic').onclick = toggleMicRecord;
-  $('pmCloseBtn').onclick = closePM;
+  const oldPmClose = $('pmCloseBtn');
+  if (oldPmClose) oldPmClose.onclick = closePM;
   $('usersClose').onclick = () => $('usersModal').classList.add('hidden');
   $('usersModal').querySelector('.admin-backdrop').onclick = () => $('usersModal').classList.add('hidden');
 
@@ -543,7 +547,11 @@ window.addEventListener('focus', () => { unreadCount = 0; document.title = baseT
 async function fetchNew(initial) {
   try {
     const q = { since: lastTs };
-    if (session && session.userId) q.userId = session.userId;
+    if (session && session.userId) {
+      q.userId = session.userId;
+      q.name = session.name || '';
+      q.avatar = session.avatar || '';
+    }
     const res = await api('fetch', null, q);
     if (!res || !res.ok) return;
     if (res.settings) applySettings(res.settings);
@@ -554,7 +562,7 @@ async function fetchNew(initial) {
       seenIds.add(m.id);
       if (m.ts > lastTs) lastTs = m.ts;
       renderMessage(m, initial);
-      if (!initial && session && m.userId !== session.userId) newFromOther++;
+      if (!initial && session && !m.toUserId && m.userId !== session.userId) newFromOther++;
     });
     if (initial) scrollBottom();
     if (newFromOther > 0) {
@@ -569,6 +577,7 @@ async function fetchNew(initial) {
         tryNativeNotification('💚 ' + lastPub.name + ' di LOVE MY FAMILY', previewOf(lastPub), lastPub.avatar);
       }
     }
+    fetchUsersQuiet(initial);
     setStatus('🟢 Tersambung');
   } catch (e) {
     setStatus('🔴 Terputus');
@@ -596,6 +605,11 @@ function playBeep() {
 async function sendText() {
   const txt = $('inputMsg').value.trim();
   if (!txt) return;
+  if (pmTarget || (pmActivePeer && !$('pmModal').classList.contains('hidden'))) {
+    showToast('🔒 PM hanya boleh dihantar dalam popup PM. Klik nama pengguna untuk buka popup.', 4000);
+    openPMPopup(pmTarget || allUsers.find(u => u.userId === pmActivePeer) || { userId: pmActivePeer, name: 'PM', avatar: '🙂' });
+    return;
+  }
   if (hasBanned(txt)) { showToast('Dilarang mencarut!'); $('inputMsg').value = ''; return; }
   $('inputMsg').value = '';
   $('emojiPicker').style.display = 'none';
@@ -699,9 +713,19 @@ function renderMessage(m, noAnim) {
   const row = document.createElement('div');
   row.className = 'msg-row ' + (mine ? 'mine' : 'other') + (noAnim ? ' no-anim' : '');
   const av = document.createElement('div'); av.className = 'msg-avatar'; av.textContent = m.avatar || '🙂';
+  if (!mine && settings.pmEnabled) {
+    av.classList.add('pm-clickable');
+    av.title = 'Klik untuk PM ' + (m.name || 'pengguna ini');
+    av.onclick = () => openPMPopup(userFromMessage(m));
+  }
   const bub = document.createElement('div'); bub.className = 'bubble ' + (mine ? 'bubble-mine' : 'bubble-other');
   if (!mine) {
     const nm = document.createElement('div'); nm.className = 'sender-name'; nm.textContent = m.name;
+    if (settings.pmEnabled) {
+      nm.classList.add('pm-clickable-name');
+      nm.title = 'Klik untuk PM ' + (m.name || 'pengguna ini');
+      nm.onclick = (e) => { e.stopPropagation(); openPMPopup(userFromMessage(m)); };
+    }
     bub.appendChild(nm);
   }
   const body = document.createElement('div'); body.className = 'bubble-body';
@@ -828,6 +852,10 @@ function scrollBottom() { const m = $('messages'); m.scrollTop = m.scrollHeight;
 function formatTime(ts) {
   const d = new Date(ts);
   return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+function userFromMessage(m) {
+  const saved = allUsers.find(u => u.userId === m.userId);
+  return saved || { userId: m.userId, name: m.name, avatar: m.avatar };
 }
 
 // ===================== UTIL =====================
@@ -956,10 +984,15 @@ async function sendPMFromPopup() {
   if (!txt) return;
   if (hasBanned(txt)) { showToast('Dilarang mencarut!'); inp.value = ''; return; }
   inp.value = '';
-  await api('send', {
+  const res = await api('sendPM', {
     userId: session.userId, name: session.name, avatar: session.avatar,
     type: 'text', content: txt, toUserId: pmActivePeer
   });
+  if (!res || !res.ok) {
+    showToast('PM tidak dihantar. Sila update Code.gs terbaru dan Deploy New version.', 6000);
+    inp.value = txt;
+    return;
+  }
   fetchNew();
 }
 async function handlePMFile(file) {
@@ -975,11 +1008,15 @@ async function handlePMFile(file) {
     else if ((file.type || '').startsWith('video/')) type = 'video';
     else if ((file.type || '').startsWith('audio/')) type = 'audio';
     const playbackUrl = (type === 'audio') ? normalizeDriveAudioUrl(up.url || up.view) : (up.url || up.view);
-    await api('send', {
+    const res = await api('sendPM', {
       userId: session.userId, name: session.name, avatar: session.avatar,
       type, content: up.view || up.url, fileUrl: playbackUrl, fileName: file.name,
       toUserId: pmActivePeer
     });
+    if (!res || !res.ok) {
+      showToast('PM fail tidak dihantar. Sila update Code.gs terbaru dan Deploy New version.', 6000);
+      return;
+    }
     fetchNew();
   } catch (err) { showToast('Ralat upload: ' + err.message); }
 }
@@ -1055,11 +1092,50 @@ async function openUsersModal() {
   const list = $('userList');
   list.innerHTML = '<div style="text-align:center;color:var(--muted);padding:10px;">Memuat…</div>';
   try {
-    const res = await api('users');
+    const res = await api('users', null, session ? { userId: session.userId, name: session.name, avatar: session.avatar } : {});
     if (!res.ok) { list.innerHTML = '<div style="color:#dc2626;text-align:center;">Gagal memuat</div>'; return; }
     allUsers = res.users || [];
+    usersLastFetch = Date.now();
+    updateHeaderOnline();
     renderUserList();
   } catch (e) { list.innerHTML = '<div style="color:#dc2626;text-align:center;">Ralat rangkaian</div>'; }
+}
+async function fetchUsersQuiet(force) {
+  if (!session) return;
+  const now = Date.now();
+  if (!force && now - usersLastFetch < 10000) return;
+  usersLastFetch = now;
+  try {
+    const res = await api('users', null, { userId: session.userId, name: session.name, avatar: session.avatar });
+    if (!res || !res.ok) return;
+    allUsers = res.users || [];
+    updateHeaderOnline();
+    if (!$('usersModal').classList.contains('hidden')) renderUserList();
+  } catch (_) {}
+}
+function getOnlineUsers() {
+  const now = Date.now();
+  return allUsers
+    .filter(u => (now - (u.lastSeen || 0)) < 60000)
+    .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+}
+function updateHeaderOnline() {
+  const text = $('headerOnlineText');
+  const strip = $('headerOnlineStrip');
+  if (!text || !strip) return;
+  const online = getOnlineUsers();
+  text.textContent = online.length ? (online.length + ' online') : 'Tiada online';
+  strip.innerHTML = '';
+  online.slice(0, 7).forEach(u => {
+    const chip = document.createElement('button');
+    const isMe = session && u.userId === session.userId;
+    chip.type = 'button';
+    chip.className = 'online-chip' + (isMe ? ' me' : '');
+    chip.title = isMe ? 'Anda sedang online' : (settings.pmEnabled ? ('Klik untuk PM ' + (u.name || 'pengguna ini')) : (u.name || 'Pengguna') + ' sedang online');
+    chip.innerHTML = '<span class="oa">' + (u.avatar || '🙂') + '</span><span class="on">' + escapeHtml(u.name || '—') + (isMe ? ' (Anda)' : '') + '</span>';
+    if (!isMe && settings.pmEnabled) chip.onclick = () => openPMPopup(u);
+    strip.appendChild(chip);
+  });
 }
 function renderUserList() {
   const list = $('userList');
