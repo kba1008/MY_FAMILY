@@ -6,7 +6,7 @@
 const API_URL = 'https://script.google.com/macros/s/AKfycbxVGz059cuL-l7CEHABQ57UT46BMZz1CEy6tl27cCpXIMgwJlmmKVpWCj1124kQn9f15A/exec'; // <-- TAMPAL URL Web App Apps Script di sini
 
 const POLL_INTERVAL = 2500;
-const ADMIN_PASSWORD_HINT = '101010';
+// (Kata laluan admin disimpan di server sahaja — tidak didedahkan di UI)
 const STORAGE_KEY = 'lmf_session_v1';
 const COOKIE_KEY  = 'lmf_session_v1';
 const COOKIE_DAYS = 365;
@@ -138,19 +138,59 @@ function bindUI() {
 }
 
 // ===================== PASTE / DRAG-DROP SCREENSHOT =====================
-function bindPasteAndDrop() {
-  // Paste image from clipboard (Ctrl/Cmd+V atau Print Screen → paste)
-  document.addEventListener('paste', (e) => {
-    if (!session) return;
-    const items = (e.clipboardData || window.clipboardData)?.items;
-    if (!items) return;
-    for (const it of items) {
-      if (it.kind === 'file' && it.type.startsWith('image/')) {
-        const f = it.getAsFile();
-        if (f) { e.preventDefault(); openImageEditor(f); return; }
-      }
+function tryHandleClipboardEvent(e) {
+  if (!session) return false;
+  const cd = e.clipboardData || window.clipboardData;
+  if (!cd) return false;
+  // 1) cuba items
+  const items = cd.items ? Array.from(cd.items) : [];
+  for (const it of items) {
+    const t = (it.type || '').toLowerCase();
+    if (t.startsWith('image/')) {
+      const f = (it.kind === 'file') ? it.getAsFile() : null;
+      if (f) { e.preventDefault(); openImageEditor(f); return true; }
     }
-  });
+  }
+  // 2) cuba files (Safari / sesetengah Chromium)
+  const files = cd.files ? Array.from(cd.files) : [];
+  for (const f of files) {
+    if ((f.type || '').startsWith('image/')) {
+      e.preventDefault(); openImageEditor(f); return true;
+    }
+  }
+  return false;
+}
+
+function bindPasteAndDrop() {
+  // Paste global (document)
+  document.addEventListener('paste', tryHandleClipboardEvent);
+  // Paste pada input (sesetengah browser hanya hantar event ke target focus)
+  const inp = $('inputMsg');
+  if (inp) inp.addEventListener('paste', tryHandleClipboardEvent);
+
+  // Butang "paste screenshot" guna Clipboard API moden (fallback)
+  const btnPaste = $('btnPasteShot');
+  if (btnPaste) btnPaste.onclick = async () => {
+    if (!navigator.clipboard || !navigator.clipboard.read) {
+      showToast('Browser ini tidak sokong Clipboard API. Sila gunakan Ctrl+V.', 3500);
+      return;
+    }
+    try {
+      const items = await navigator.clipboard.read();
+      for (const it of items) {
+        for (const type of it.types) {
+          if (type.startsWith('image/')) {
+            const blob = await it.getType(type);
+            openImageEditor(blob);
+            return;
+          }
+        }
+      }
+      showToast('Tiada gambar dalam clipboard', 2500);
+    } catch (err) {
+      showToast('Tidak dapat baca clipboard: ' + (err.message || err), 3500);
+    }
+  };
 
   // Drag & drop image ke chat
   const drop = $('chatScreen');
@@ -360,33 +400,55 @@ function undoEdit() {
   edState.ctx.putImageData(edState.history[edState.history.length - 1], 0, 0);
 }
 
-// ===================== CALL (Jitsi via tab baru) =====================
+// ===================== CALL (Jitsi - premium launcher) =====================
 const JITSI_ROOM = 'LoveMyFamily-Room-2026';
-function startCall(video) {
-  if (!session) { showToast('Sila login dulu'); return; }
+function buildJitsiUrl(video) {
   const params = new URLSearchParams({
     'config.startWithVideoMuted': video ? 'false' : 'true',
     'config.prejoinPageEnabled': 'false',
-    'userInfo.displayName': session.name
+    'userInfo.displayName': session ? session.name : 'Guest'
   });
-  const url = 'https://meet.jit.si/' + encodeURIComponent(JITSI_ROOM) + '#' + params.toString();
+  return 'https://meet.jit.si/' + encodeURIComponent(JITSI_ROOM) + '#' + params.toString();
+}
 
-  // Buka tab/window baru — paling reliable. Iframe selalu disekat permission camera/mic.
-  const w = window.open(url, '_blank', 'noopener,noreferrer');
-  if (!w) {
-    showToast('Sila benarkan popup untuk mulakan call', 4000);
-  } else {
-    showToast((video ? '🎥 Video' : '📞 Audio') + ' call dibuka di tab baru', 2500);
+function startCall(video) {
+  if (!session) { showToast('Sila login dulu'); return; }
+  const url = buildJitsiUrl(video);
+  openCallModal(video, url);
+}
+
+function openCallModal(video, url) {
+  const modal = $('callModal');
+  if (!modal) {
+    // fallback lama
+    window.open(url, '_blank', 'noopener,noreferrer');
+    return;
   }
-
-  // Hantar link ke chat
-  api('send', {
-    userId: session.userId, name: session.name, avatar: session.avatar,
-    type: 'text',
-    content: (video ? '🎥' : '📞') + ' ' + session.name + ' memulakan ' +
-             (video ? 'VIDEO CALL' : 'panggilan suara') +
-             ' — Sertai: ' + url
-  }).catch(()=>{});
+  $('callModalTitle').textContent = video ? '🎥 Video Call' : '📞 Panggilan Suara';
+  $('callModalDesc').textContent  = video
+    ? 'Mulakan panggilan video selamat melalui Jitsi Meet. Sila benarkan akses kamera & mikrofon apabila diminta.'
+    : 'Mulakan panggilan suara selamat melalui Jitsi Meet. Sila benarkan akses mikrofon apabila diminta.';
+  const join = $('callJoinLink');
+  join.href = url;
+  join.textContent = (video ? '🎥' : '📞') + ' Sertai Sekarang';
+  $('callCopyLink').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast('🔗 Pautan disalin');
+    } catch { showToast('Tidak dapat menyalin pautan', 2500); }
+  };
+  $('callShareChat').onclick = () => {
+    api('send', {
+      userId: session.userId, name: session.name, avatar: session.avatar,
+      type: 'text',
+      content: (video ? '🎥' : '📞') + ' ' + session.name + ' memulakan ' +
+               (video ? 'VIDEO CALL' : 'panggilan suara') +
+               ' — Sertai: ' + url
+    }).catch(()=>{});
+    showToast('📢 Dikongsi ke chat');
+  };
+  $('callClose').onclick = () => modal.classList.add('hidden');
+  modal.classList.remove('hidden');
 }
 
 // ===================== LOGIN / SESSION =====================
@@ -427,21 +489,51 @@ function startPolling() {
 }
 function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
 
+let unreadCount = 0;
+const baseTitle = document.title;
+window.addEventListener('focus', () => { unreadCount = 0; document.title = baseTitle; });
+
 async function fetchNew(initial) {
   try {
     const res = await api('fetch', null, { since: lastTs });
     if (!res || !res.ok) return;
     const msgs = res.messages || [];
+    let newFromOther = 0;
     msgs.forEach(m => {
       if (seenIds.has(m.id)) return;
       seenIds.add(m.id);
       if (m.ts > lastTs) lastTs = m.ts;
       renderMessage(m, initial);
+      if (!initial && session && m.userId !== session.userId) newFromOther++;
     });
     if (initial) scrollBottom();
+    if (newFromOther > 0) {
+      playBeep();
+      if (document.hidden || !document.hasFocus()) {
+        unreadCount += newFromOther;
+        document.title = '(' + unreadCount + ') ' + baseTitle;
+      }
+    }
   } catch (e) {
     setStatus('🔴 Terputus');
   }
+}
+
+// Notifikasi bunyi pendek (WebAudio — tiada fail)
+let _audioCtx = null;
+function playBeep() {
+  try {
+    _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _audioCtx;
+    const o = ctx.createOscillator(); const g = ctx.createGain();
+    o.type = 'sine'; o.frequency.value = 880;
+    g.gain.value = 0.0001;
+    o.connect(g); g.connect(ctx.destination);
+    const t = ctx.currentTime;
+    g.gain.exponentialRampToValueAtTime(0.12, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+    o.start(t); o.stop(t + 0.24);
+  } catch(_) {}
 }
 
 // ===================== SEND =====================
@@ -485,15 +577,43 @@ function fileToBase64(file) {
   });
 }
 
-// ===================== ADMIN CLEAR =====================
-async function doClearAll() {
-  const p = prompt('Masukkan kata laluan ADMIN (hint: ' + ADMIN_PASSWORD_HINT + ') untuk padam SEMUA chat:');
-  if (p === null) return;
-  const res = await api('clear', { password: p });
-  if (res.ok) {
-    $('messages').innerHTML = ''; lastTs = 0; seenIds.clear();
-    showToast('✅ Semua chat dipadam!');
-  } else { showToast('❌ ' + (res.error || 'Gagal')); }
+// ===================== ADMIN CLEAR (premium modal) =====================
+function doClearAll() {
+  const modal = $('adminModal');
+  if (!modal) return;
+  const input = $('adminPwd');
+  const errEl = $('adminErr');
+  input.value = '';
+  errEl.textContent = '';
+  modal.classList.remove('hidden');
+  setTimeout(() => input.focus(), 80);
+
+  const close = () => modal.classList.add('hidden');
+  $('adminCancel').onclick = close;
+  modal.querySelector('.admin-backdrop').onclick = close;
+
+  const submit = async () => {
+    const p = input.value;
+    if (!p) { errEl.textContent = 'Sila masukkan kata laluan.'; return; }
+    $('adminConfirm').disabled = true;
+    errEl.textContent = '';
+    try {
+      const res = await api('clear', { password: p });
+      if (res.ok) {
+        $('messages').innerHTML = ''; lastTs = 0; seenIds.clear();
+        close();
+        showToast('✅ Semua chat telah dipadam');
+      } else {
+        errEl.textContent = '❌ ' + (res.error || 'Kata laluan salah');
+      }
+    } catch (e) {
+      errEl.textContent = '❌ Ralat rangkaian';
+    } finally {
+      $('adminConfirm').disabled = false;
+    }
+  };
+  $('adminConfirm').onclick = submit;
+  input.onkeydown = (e) => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') close(); };
 }
 
 // ===================== RENDER =====================

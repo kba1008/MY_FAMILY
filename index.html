@@ -205,7 +205,48 @@
     .login-card{padding:28px 22px;border-radius:24px;}
     .icon-btn{width:38px;height:38px;}
   }
+
+  /* ============ PREMIUM MODAL (Admin + Call) ============ */
+  .lmf-modal{position:fixed;inset:0;z-index:2500;display:flex;align-items:center;justify-content:center;padding:18px;}
+  .lmf-modal.hidden{display:none;}
+  .admin-backdrop{position:absolute;inset:0;background:radial-gradient(1000px 600px at 50% 30%,rgba(91,108,255,.35),rgba(11,23,51,.78));backdrop-filter:blur(14px) saturate(140%);animation:fadeBg .25s ease;}
+  @keyframes fadeBg{from{opacity:0}to{opacity:1}}
+  @keyframes popIn{from{opacity:0;transform:translateY(14px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}
+  .lmf-card{position:relative;width:100%;max-width:440px;border-radius:24px;
+    background:linear-gradient(180deg,rgba(255,255,255,.97),rgba(255,255,255,.9));
+    border:1px solid rgba(255,255,255,.6);box-shadow:0 40px 80px rgba(20,30,80,.35),0 12px 30px rgba(20,30,80,.18);
+    overflow:hidden;animation:popIn .28s cubic-bezier(.2,.9,.3,1.2);}
+  .lmf-card::before{content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;
+    background:linear-gradient(135deg,var(--accent),var(--accent-2),var(--accent-pink));
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none;opacity:.7;}
+  .lmf-hero{padding:22px 22px 8px;display:flex;align-items:center;gap:14px;position:relative;}
+  .lmf-hero .ico{width:54px;height:54px;border-radius:16px;display:flex;align-items:center;justify-content:center;
+    font-size:26px;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;box-shadow:var(--glow-accent);}
+  .lmf-hero.danger .ico{background:linear-gradient(135deg,#ef4444,#b91c1c);box-shadow:0 10px 30px rgba(239,68,68,.4);}
+  .lmf-hero h3{margin:0;font-family:"Space Grotesk",inherit;font-size:19px;color:var(--ink);}
+  .lmf-hero p{margin:2px 0 0;font-size:13px;color:var(--muted);}
+  .lmf-body{padding:14px 22px 6px;position:relative;}
+  .lmf-body p{margin:0 0 12px;color:var(--ink-2);font-size:14px;line-height:1.55;}
+  .lmf-input{width:100%;padding:13px 14px;border-radius:14px;border:1.5px solid var(--border-strong);
+    background:#fff;font-family:inherit;font-size:15px;color:var(--ink);outline:none;
+    transition:border-color .15s,box-shadow .15s;}
+  .lmf-input.pwd{letter-spacing:6px;text-align:center;font-size:18px;font-weight:700;}
+  .lmf-input:focus{border-color:var(--accent);box-shadow:0 0 0 4px rgba(91,108,255,.18);}
+  .lmf-err{min-height:18px;margin-top:8px;color:#dc2626;font-size:12.5px;font-weight:600;text-align:center;}
+  .lmf-foot{display:flex;gap:10px;padding:14px 22px 20px;justify-content:flex-end;flex-wrap:wrap;position:relative;}
+  .lmf-btn{padding:11px 18px;border-radius:12px;border:0;cursor:pointer;font-weight:700;font-family:inherit;
+    font-size:13.5px;display:inline-flex;align-items:center;gap:8px;text-decoration:none;
+    transition:transform .12s,filter .15s,box-shadow .15s;}
+  .lmf-btn:hover{transform:translateY(-1px);filter:brightness(1.05);}
+  .lmf-btn:disabled{opacity:.6;cursor:not-allowed;transform:none;}
+  .lmf-btn.ghost{background:rgba(15,30,60,.06);color:var(--ink);}
+  .lmf-btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff;box-shadow:var(--glow-accent);}
+  .lmf-btn.danger{background:linear-gradient(135deg,#ef4444,#b91c1c);color:#fff;box-shadow:0 10px 24px rgba(239,68,68,.35);}
+  .lmf-btn.success{background:linear-gradient(135deg,#16a34a,#059669);color:#fff;box-shadow:0 10px 24px rgba(22,163,74,.35);}
 </style>
+</head>
+<body>
 </head>
 <body>
 
@@ -242,7 +283,8 @@
 
     <div class="composer">
       <button id="btnEmoji" class="icon-btn" title="Emoji">😊</button>
-      <button id="btnAttach" class="icon-btn" title="Lampiran / Gambar (atau tekan Ctrl+V untuk paste screenshot)">📎</button>
+      <button id="btnAttach" class="icon-btn" title="Lampiran / Gambar">📎</button>
+      <button id="btnPasteShot" class="icon-btn" title="Tampal screenshot dari clipboard">📋</button>
       <input id="fileInput" type="file" style="display:none"
              accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.rar,.txt" />
       <input id="inputMsg" class="input-msg" type="text" placeholder="Tulis mesej... (Ctrl+V untuk tampal screenshot)" />
@@ -311,6 +353,54 @@
       </div>
       <div class="canvas-wrap">
         <canvas id="editCanvas"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- ADMIN PASSWORD MODAL -->
+  <div id="adminModal" class="lmf-modal hidden" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
+    <div class="admin-backdrop"></div>
+    <div class="lmf-card">
+      <div class="lmf-hero danger">
+        <div class="ico">🔐</div>
+        <div>
+          <h3 id="adminTitle">Pengesahan Admin Diperlukan</h3>
+          <p>Tindakan ini akan memadam SEMUA chat secara kekal.</p>
+        </div>
+      </div>
+      <div class="lmf-body">
+        <p>Sila masukkan kata laluan admin untuk meneruskan. Tiada cara untuk membatalkan tindakan ini selepas disahkan.</p>
+        <input id="adminPwd" class="lmf-input pwd" type="password" inputmode="numeric" autocomplete="off" placeholder="••••••" />
+        <div id="adminErr" class="lmf-err"></div>
+      </div>
+      <div class="lmf-foot">
+        <button id="adminCancel" class="lmf-btn ghost">Batal</button>
+        <button id="adminConfirm" class="lmf-btn danger">🗑️ Padam Semua</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CALL MODAL -->
+  <div id="callModal" class="lmf-modal hidden" role="dialog" aria-modal="true">
+    <div class="admin-backdrop"></div>
+    <div class="lmf-card">
+      <div class="lmf-hero">
+        <div class="ico">📞</div>
+        <div>
+          <h3 id="callModalTitle">Panggilan</h3>
+          <p id="callModalDesc">Mulakan panggilan selamat melalui Jitsi Meet.</p>
+        </div>
+      </div>
+      <div class="lmf-body">
+        <p style="font-size:12.5px;color:var(--muted);margin-bottom:6px;">Tip: jika kamera/mikrofon tidak berfungsi, pastikan anda mengakses laman ini melalui HTTPS dan benarkan izin pelayar.</p>
+      </div>
+      <div class="lmf-foot" style="justify-content:space-between;">
+        <button id="callClose" class="lmf-btn ghost">Tutup</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="callCopyLink" class="lmf-btn ghost" title="Salin pautan">🔗 Salin Pautan</button>
+          <button id="callShareChat" class="lmf-btn success">📢 Kongsi ke Chat</button>
+          <a id="callJoinLink" class="lmf-btn primary" target="_blank" rel="noopener" href="#">Sertai Sekarang</a>
+        </div>
       </div>
     </div>
   </div>

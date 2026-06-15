@@ -1,5 +1,5 @@
 // LOVE MY FAMILY - Service Worker
-const CACHE = 'lmf-v1';
+const CACHE = 'lmf-v2';
 const ASSETS = ['./', './index.html', './app.js', './manifest.json'];
 
 self.addEventListener('install', (e) => {
