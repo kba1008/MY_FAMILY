@@ -3,7 +3,7 @@
  *  Backend: Google Apps Script Web App (Code.gs)
  *  ===================================================================== */
 
-const API_URL = 'https://script.google.com/macros/s/AKfycbwh0MMNg3Uk43FhDy3ogxZb5mWeMuHEU51H98l4DwZsUNXYibZlFIevnzEY1-4BhW1vnw/exec'; // <-- TAMPAL URL Web App Apps Script di sini
+const API_URL = 'https://script.google.com/macros/s/AKfycbxVGz059cuL-l7CEHABQ57UT46BMZz1CEy6tl27cCpXIMgwJlmmKVpWCj1124kQn9f15A/exec'; // <-- TAMPAL URL Web App Apps Script di sini
 
 const POLL_INTERVAL = 2500;
 // (Kata laluan admin disimpan di server sahaja — tidak didedahkan di UI)
@@ -821,6 +821,8 @@ function openSettingsModal() {
         applySettings(res.settings || { theme: pendingTheme, pmEnabled: pendingPM });
         modal.classList.add('hidden');
         showToast('✅ Tetapan disimpan');
+      } else if (res.error && /Unknown action/i.test(res.error)) {
+        $('settingsErr').innerHTML = '⚠️ Apps Script anda masih versi lama.<br>Sila buka script.google.com → <b>Deploy</b> → <b>Manage deployments</b> → ✏️ Edit → Version: <b>New version</b> → Deploy. Kemudian cuba semula.';
       } else {
         $('settingsErr').textContent = '❌ ' + (res.error || 'Gagal');
       }
@@ -831,28 +833,50 @@ function openSettingsModal() {
 
 // ===================== VOICE MESSAGE (mic) =====================
 async function toggleMicRecord() {
+  // Gesture-safe: panggil getUserMedia terus tanpa await sebelumnya
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     stopRecording(true);
     return;
   }
+  if (!window.isSecureContext) {
+    showToast('Mic perlukan HTTPS. Buka tapak ini melalui https://', 4000); return;
+  }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showToast('Browser tidak sokong rakaman audio', 3000); return;
+    showToast('Browser tidak sokong rakaman audio. Cuba Chrome/Safari terkini.', 4000); return;
   }
+  if (!window.MediaRecorder) {
+    showToast('MediaRecorder tidak disokong di browser ini.', 4000); return;
+  }
+  let stream;
   try {
-    recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
-    showToast('Akses mikrofon ditolak: ' + (e.message || e), 3500); return;
+    const name = e && e.name || '';
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      showToast('🎤 Akses mic ditolak. Benarkan mic dalam tetapan browser.', 4500);
+    } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+      showToast('🎤 Tiada mikrofon dijumpai pada peranti ini.', 4500);
+    } else if (name === 'NotReadableError') {
+      showToast('🎤 Mic sedang digunakan oleh app lain.', 4500);
+    } else {
+      showToast('🎤 Ralat mic: ' + (e.message || name || e), 4500);
+    }
+    return;
   }
+  recStream = stream;
   recChunks = [];
-  const mimeOpts = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg'];
+  const mimeOpts = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg',''];
   let chosenMime = '';
-  for (const m of mimeOpts) { if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) { chosenMime = m; break; } }
+  for (const m of mimeOpts) {
+    try { if (!m || MediaRecorder.isTypeSupported(m)) { chosenMime = m; break; } } catch(_) {}
+  }
   try {
     mediaRecorder = chosenMime ? new MediaRecorder(recStream, { mimeType: chosenMime }) : new MediaRecorder(recStream);
   } catch (e) { showToast('Tidak boleh mula merakam: ' + e.message, 3500); cleanupRec(); return; }
   mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
   mediaRecorder.onstop = onRecStop;
-  mediaRecorder.start();
+  mediaRecorder.onerror = (e) => { showToast('Ralat rakaman: ' + (e.error && e.error.message || ''), 3500); cleanupRec(); };
+  try { mediaRecorder.start(250); } catch(_) { mediaRecorder.start(); }
   recStartedAt = Date.now();
   $('btnMic').classList.add('recording');
   $('recOverlay').classList.add('show');
