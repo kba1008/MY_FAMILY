@@ -7,11 +7,41 @@
  *    2. Tampal URL Web App tersebut ke pemboleh ubah API_URL di bawah.
  * ===================================================================== */
 
-const API_URL = 'https://script.google.com/macros/s/AKfycbxVGz059cuL-l7CEHABQ57UT46BMZz1CEy6tl27cCpXIMgwJlmmKVpWCj1124kQn9f15A/exec'; // <-- TAMPAL URL Web App Apps Script di sini (https://script.google.com/macros/s/.../exec)
+const API_URL = ''; // <-- TAMPAL URL Web App Apps Script di sini (https://script.google.com/macros/s/.../exec)
 
 const POLL_INTERVAL = 2500;        // ms - poll mesej baru
 const ADMIN_PASSWORD_HINT = '101010';
 const STORAGE_KEY = 'lmf_session_v1';
+const COOKIE_KEY  = 'lmf_session_v1';
+const COOKIE_DAYS = 365;
+
+// ---- Multi-layer session persistence (localStorage + sessionStorage + cookie) ----
+function saveSession(obj) {
+  const json = JSON.stringify(obj);
+  try { localStorage.setItem(STORAGE_KEY, json); } catch(_){}
+  try { sessionStorage.setItem(STORAGE_KEY, json); } catch(_){}
+  try {
+    const d = new Date(); d.setTime(d.getTime() + COOKIE_DAYS*864e5);
+    document.cookie = COOKIE_KEY + '=' + encodeURIComponent(json)
+      + ';expires=' + d.toUTCString() + ';path=/;SameSite=Lax';
+  } catch(_){}
+}
+function loadSession() {
+  let raw = null;
+  try { raw = localStorage.getItem(STORAGE_KEY); } catch(_){}
+  if (!raw) { try { raw = sessionStorage.getItem(STORAGE_KEY); } catch(_){} }
+  if (!raw) {
+    const m = document.cookie.match(new RegExp('(?:^|; )' + COOKIE_KEY + '=([^;]*)'));
+    if (m) { try { raw = decodeURIComponent(m[1]); } catch(_){} }
+  }
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch(_) { return null; }
+}
+function clearSession() {
+  try { localStorage.removeItem(STORAGE_KEY); } catch(_){}
+  try { sessionStorage.removeItem(STORAGE_KEY); } catch(_){}
+  try { document.cookie = COOKIE_KEY + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/'; } catch(_){}
+}
 
 // ===================== STATE =====================
 let session = null;                // {userId, name, avatar}
@@ -51,13 +81,12 @@ function init() {
   buildEmojiPicker();
   bindUI();
 
-  // Auto-resume jika sudah login
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved) {
-    try {
-      session = JSON.parse(saved);
-      enterChat(true);
-    } catch (_) { localStorage.removeItem(STORAGE_KEY); }
+  // Auto-resume jika sudah login (localStorage/sessionStorage/cookie)
+  const saved = loadSession();
+  if (saved && saved.userId && saved.name) {
+    session = saved;
+    saveSession(session); // refresh semula semua layer
+    enterChat(true);
   }
 
   // Daftar service worker
@@ -115,6 +144,42 @@ function bindUI() {
 
   $('btnLogout').onclick = doLogout;
   $('btnClear').onclick = doClearAll;
+
+  // Jitsi call buttons
+  $('btnAudioCall').onclick = () => startCall(false);
+  $('btnVideoCall').onclick = () => startCall(true);
+  $('btnEndCall').onclick = endCall;
+}
+
+// ===================== JITSI CALL =====================
+const JITSI_ROOM = 'LoveMyFamily-Room-2026';  // semua user join bilik sama
+function startCall(video) {
+  if (!session) { showToast('Sila login dulu'); return; }
+  const params = new URLSearchParams({
+    'config.startWithVideoMuted': video ? 'false' : 'true',
+    'config.startWithAudioMuted': 'false',
+    'config.prejoinPageEnabled': 'false',
+    'config.disableDeepLinking': 'true',
+    'userInfo.displayName': session.name,
+  });
+  const url = 'https://meet.jit.si/' + encodeURIComponent(JITSI_ROOM)
+    + '#' + params.toString().replace(/&/g, '&');
+  $('callTitle').textContent = (video ? '🎥 Video Call' : '📞 Panggilan Suara') + ' • ' + JITSI_ROOM;
+  $('callFrame').src = url;
+  $('callModal').classList.remove('hidden');
+
+  // Hantar notifikasi ke chat supaya ahli lain boleh join
+  api('send', {
+    userId: session.userId, name: session.name, avatar: session.avatar,
+    type: 'text',
+    content: (video ? '🎥' : '📞') + ' ' + session.name + ' memulakan ' +
+             (video ? 'VIDEO CALL' : 'panggilan suara') +
+             ' — Sertai: https://meet.jit.si/' + JITSI_ROOM
+  }).catch(()=>{});
+}
+function endCall() {
+  $('callFrame').src = 'about:blank';
+  $('callModal').classList.add('hidden');
 }
 
 // ===================== LOGIN / SESSION =====================
@@ -128,7 +193,7 @@ function doLogin() {
   const userId = 'u_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
   session = { userId, name, avatar };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+  saveSession(session);
 
   api('register', session).catch(() => {});
   enterChat(false);
@@ -136,7 +201,7 @@ function doLogin() {
 
 function doLogout() {
   if (!confirm('Log keluar dari chat?')) return;
-  localStorage.removeItem(STORAGE_KEY);
+  clearSession();
   stopPolling();
   session = null;
   lastTs = 0;
